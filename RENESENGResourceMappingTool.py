@@ -1,7 +1,7 @@
-# RENESENG Resource Mapping Tool
+# Biomass Supply Chain Network Data Extractor
 # Author name: Nathanial Cooper
 # Author email: nathanial.cooper AT imperial.ac.uk (preferred), nattiecooper AT gmail.com (alternate)
-# Date: 07 March 2018
+# Date: 24 July 2018
 # Version: 1.0
 #-------------------------------------------DESCRIPTION-----------------------------------------------------------
 # This program extracts data relevant for biomass supply chain network optimization.
@@ -15,16 +15,17 @@
 # 7) a shapefile or vector layer of some sort that represents the area of interest.
 # 8) the desired number of grid cells
 # 9) the minimum cell area fraction to be counted
-# This script outputs:
+# This script outputs: 
 # 1) a CSV of the ID numbers of all cells, the area of all the cells 
 # 2) a CSV of all linear distances between the centroids of all cells
 # 3) a CSV of the area of the raster bands of interest in each cell
 # 4) a CSV of the tortuosity matrix between cells
 # 5) a CSV of the average biomass yield per cell
-# 6) a shapefile of the grid used
+# 6) CSV of the slope and intercepts  for linear estimators of the biomass yield per cell
+# 7) a shapefile of the grid used
 #----------------------------------------------------------------------------------------------------------------------
 
-##RENESENG Resource Mapping Tool=name
+##Supply Chain Network Data Aggregator and Linear Estimator=name
 ##Land_Use_Raster_Data=raster
 ##No_Data_Value=number 48
 ##Raster_Value_of_Interest_separate_values_by_commas=string 12
@@ -42,12 +43,22 @@
 ##Region_Shapefile=vector Polygon
 ##Desired_Number_of_Cells=number 100
 ##Only_count_cells_with_at_least_x_percent_of_the_area_of_the_largest_cell_where_0_includes_all_cells=number 5
+##Lower_Breakpoint_Fraction=number 0.333
+##Upper_Breakpoint_Fraction=number 0.666
 ##Output_Cell_Area=output table
 ##Output_Linear_Distance_Between_Cells=output table
 ##Output_Arable_Land_Area=output table
 ##Output_Tortuosity_Between_Cells=output table
 ##Output_Bioyield_Averages=output table
+##Output_Bioyield_Low_Approximation_m=output table
+##Output_Bioyield_Mid_Approximation_m=output table
+##Output_Bioyield_High_Approximation_m=output table
+##Output_Bioyield_Low_Approximation_b=output table
+##Output_Bioyield_Mid_Approximation_b=output table
+##Output_Bioyield_High_Approximation_b=output table
 ##Output_Grid_SHP=output vector
+# ##Output_yieldmap1=output table
+# ##Output_yieldmap2=output table
 
 # Load libraries from QGIS and Python core
 from qgis.core import *
@@ -56,6 +67,7 @@ from PyQt4.QtCore import *
 import math
 import csv
 import time
+import bisect
 
 
 # ------------------------Variable Declarations and Initializations
@@ -70,12 +82,21 @@ outLDcsv = Output_Linear_Distance_Between_Cells
 outLAcsv = Output_Arable_Land_Area
 outTTcsv = Output_Tortuosity_Between_Cells
 outBYcsv = Output_Bioyield_Averages
+outBYLUmcsv = Output_Bioyield_Low_Approximation_m
+outBYMUmcsv = Output_Bioyield_Mid_Approximation_m
+outBYHUmcsv = Output_Bioyield_High_Approximation_m
+outBYLUbcsv = Output_Bioyield_Low_Approximation_b
+outBYMUbcsv = Output_Bioyield_Mid_Approximation_b
+outBYHUbcsv = Output_Bioyield_High_Approximation_b
 outSHP = Output_Grid_SHP
 maxIter = 10 # maximum number of iterations to get correct number of cells
 minUnder = 0.95
 maxOver = 1.05
 iter = 0
 areaConv = 100/4 #converts hectares to km^2 and then annual production to monthly production
+x_lo = Lower_Breakpoint_Fraction
+x_hi = Upper_Breakpoint_Fraction
+#yieldmapcount = 0
 
 # new attribute names
 fieldNameID = "IDnum" 
@@ -249,8 +270,17 @@ def writeVec(vect,destFile):
     with open(destFile,"wb") as ofileDest:
         writerDest = csv.writer(ofileDest, delimiter=',', quoting=csv.QUOTE_NONNUMERIC) # writer is necessary to create csv
         
+        isList = sum([isinstance(x,list) for x in vect])
+        maxLen = 0
+        
+        if isList > 0:
+            maxLen = max([len(x) for x in vect])+1
         for k in range(0,len(vect)):
-            row_k = [k+1] + [vect[k]]
+            if isinstance(vect[k],list):
+                row_k = [k+1] + vect[k]
+            else:
+                row_k = [k+1] + [vect[k]]
+            row_k = row_k + [0]*(maxLen-len(row_k))
             writerDest.writerow(row_k)
         
     iface.mainWindow().statusBar().showMessage("Writing vector to CSV - Complete") # Update the user in the status bar
@@ -294,9 +324,9 @@ def writeLinDist(layer_grid):
 
 # ------------------------Calculate Tortuosity Data
 def writeTortuosity(layer_tort):
-    if not(layer_tort.isValid()):
+    if(not(layer_tort.isValid())):
         return -1
-    
+
     iface.mainWindow().statusBar().showMessage("Writing Tortuosities to CSV")
     with open(outTTcsv,"wb") as ofileTT:
         writerTT = csv.writer(ofileTT, delimiter=',', quoting=csv.QUOTE_NONNUMERIC) # writer is necessary to create csv
@@ -413,6 +443,14 @@ def bioyield(layer_constraint, layer_bio,layer_fullRast,layer_gridSource,layer_g
         currLine = rastAreas.readline()
     iface.mainWindow().statusBar().showMessage("Performing Bioyield Raster Calculations - Complete") # Update the user in the status bar
     
+#    global yieldmapcount
+#    if (yieldmapcount == 0):
+#        tmpflag = writeVec(vector_BYland,Output_yieldmap1)
+#        yieldmapcount = 1
+#    elif (yieldmapcount == 1):
+#        tmpflag = writeVec(vector_BYland,Output_yieldmap2)
+#        yieldmapcount = 2
+    
     # Calculate the average bioyield for each cell
     for i in range(len(vector_BYland)):
         totArea = 0
@@ -421,11 +459,67 @@ def bioyield(layer_constraint, layer_bio,layer_fullRast,layer_gridSource,layer_g
             totArea = totArea+vector_BYland[i][j*2+1] # [km^2]
             totGrowth = totGrowth+(vector_BYland[i][j*2+1]*vector_BYland[i][j*2]) # [tdm / month]
         if totGrowth>0:
-            vector_BYlandAvg[i] = totArea/totGrowth
+            vector_BYlandAvg[i] = totArea/totGrowth # [km^2 month / tdm]
         else:
             vector_BYlandAvg[i] = 0
+            
+    # Calculate the total land area used and the total biomass produced by summing, going from best land to worst land
+    landArea = [[] for i in range(len(vector_BYland))]
+    bioPerYR = [[] for i in range(len(vector_BYland))]
+    landReqd = [[] for i in range(len(vector_BYland))]
+    bioProd= [[] for i in range(len(vector_BYland))]
+    for i in range(len(vector_BYland)):
+        for j in range(len(vector_BYland[i])/2):
+            if not(vector_BYland[i][j*2] == 0):
+                landArea[i] = [vector_BYland[i][j*2+1]] + landArea[i]
+                bioPerYR[i] = [vector_BYland[i][j*2+1]*vector_BYland[i][j*2]] + bioPerYR[i]
+        landReqd[i] = [sum(landArea[i][:k]) for k in range(0,len(landArea[i])+1)]
+        bioProd[i] = [sum(bioPerYR[i][:k]) for k in range(0,len(bioPerYR[i])+1)]
 
-    return vector_BYlandAvg
+    # Calculate linear estimators
+
+    for i in range(len(landReqd)):
+        if ((bioProd[i]) and (len(bioProd[i]) > 1) and not(bioProd[i][-1] == 0)):
+            
+            # Normalize the vectors
+            y_s = [float(bioProd[i][j])/float(bioProd[i][-1]) for j in range(0,len(bioProd[i]))]
+            x_s = [float(landReqd[i][j])/float(landReqd[i][-1]) for j in range(0,len(landReqd[i]))]
+            
+            #find bisection points (identify where the breakpoints area)
+            x_lo_idx = [bisect.bisect(x_s,x_lo)-1,bisect.bisect(x_s,x_lo)]
+            x_hi_idx = [bisect.bisect(x_s,x_hi)-1,bisect.bisect(x_s,x_hi)]
+            
+            m_interp_lo = (y_s[x_lo_idx[1]] - y_s[x_lo_idx[0]])/(x_s[x_lo_idx[1]] - x_s[x_lo_idx[0]])
+            b_interp_lo = y_s[x_lo_idx[0]] - m_interp_lo*x_s[x_lo_idx[0]]
+            
+            y_lo = x_lo*m_interp_lo + b_interp_lo
+            
+            m_interp_hi = (y_s[x_hi_idx[1]] - y_s[x_hi_idx[0]])/(x_s[x_hi_idx[1]] - x_s[x_hi_idx[0]])
+            b_interp_hi = y_s[x_hi_idx[0]] - m_interp_hi*x_s[x_hi_idx[0]]
+            
+            y_hi = x_hi*m_interp_hi + b_interp_hi
+            
+            # Get the slope and intersection of linear estimators
+            [m_lo, b_lo] = linCalc(x_s[0],y_s[0],x_lo,y_lo,landReqd[i][-1],bioProd[i][-1])
+            [m_med, b_med] = linCalc(x_lo,y_lo,x_hi,y_hi,landReqd[i][-1],bioProd[i][-1])
+            [m_hi, b_hi] = linCalc(x_hi,y_hi,x_s[-1],y_s[-1],landReqd[i][-1],bioProd[i][-1])
+            
+            vector_BYland[i] = [m_lo,b_lo,m_med,b_med,m_hi,b_hi]
+            
+        else:
+            vector_BYland[i] = [0,0,0,0,0,0]
+        
+    return [vector_BYland, vector_BYlandAvg]
+
+# ------------------------Calculate the linear coefficients for the bioyield
+def linCalc(x1,y1,x2,y2,xmax,ymax):
+    if ((x2-x1) == 0) or ((y2-y1) == 0) or (xmax == 0) or (ymax == 0):
+        return [0,0]
+    
+    m = ((y2-y1)*ymax)/((x2-x1)*xmax)
+    b = ymax*(y1-((y2-y1)/(x2-x1))*x1)
+    
+    return [m,b]
 
 # ------------------------Write bioyield results to GAMS-readable format
 def writeBioyield(vectA,nameA,vectB,nameB,vectC,nameC,vectD,nameD,vectE,nameE,destFile):
@@ -470,7 +564,6 @@ QgsMapLayerRegistry.instance().addMapLayer(reprojSHP)
 
 if constRast:
     reproj_constRast = rastReproj(constRast,fullRast_noConstr,0)
-    #QgsMapLayerRegistry.instance().addMapLayer(reproj_constRast)
     
 if byARast:
     reproj_byARast = rastReproj(byARast,fullRast_noConstr,1)
@@ -490,15 +583,17 @@ print "Time to reproject: %.2f s" % t_01
 
 
 # Apply the constraint map to the full rast
-fRxmin = fullRast_noConstr.extent().xMinimum()
-fRxmax = fullRast_noConstr.extent().xMaximum()
-fRymin = fullRast_noConstr.extent().yMinimum()
-fRymax = fullRast_noConstr.extent().yMaximum()
-extent = "%f,%f,%f,%f" %(fRxmin, fRxmax, fRymin, fRymax)
-eqn = 'A*B'
-output_tmpRast = processing.runalg("grass:r.mapcalculator",fullRast_noConstr.dataProvider().dataSourceUri(),reproj_constRast.dataProvider().dataSourceUri(),None,None,None,None,eqn,extent,0,None)
-fullRast = processing.getObject(output_tmpRast['outfile'])
-QgsMapLayerRegistry.instance().addMapLayer(fullRast)
+if constRast:
+    fRxmin = fullRast_noConstr.extent().xMinimum()
+    fRxmax = fullRast_noConstr.extent().xMaximum()
+    fRymin = fullRast_noConstr.extent().yMinimum()
+    fRymax = fullRast_noConstr.extent().yMaximum()
+    extent = "%f,%f,%f,%f" %(fRxmin, fRxmax, fRymin, fRymax)
+    
+    eqn = 'A*B'
+    output_tmpRast = processing.runalg("grass:r.mapcalculator",fullRast_noConstr.dataProvider().dataSourceUri(),reproj_constRast.dataProvider().dataSourceUri(),None,None,None,None,eqn,extent,0,None)
+    fullRast = processing.getObject(output_tmpRast['outfile'])
+    QgsMapLayerRegistry.instance().addMapLayer(fullRast)
 
 t_2 = time.time()
 t_12 = t_2 - t_1
@@ -590,6 +685,7 @@ print "Time to export centroid distances: %.2f s" % t_78
 # Export Tortuosity matrix csv
 writeToruosityFlag = writeTortuosity(fullGridSHP)
     
+
 t_9 = time.time()
 t_89 = t_9 - t_8
 print "Time to calculate and export tortuosity: %.2f s" % t_89
@@ -625,6 +721,11 @@ print "Time to write stats to csv: %.2f s" % t_1112
 
 
 # Calculate the bio-yield
+proc_byARast = []
+proc_byBRast = []
+proc_byCRast = []
+proc_byDRast = []
+proc_byERast = []
 proc_byARastAvg = []
 proc_byBRastAvg = []
 proc_byCRastAvg = []
@@ -633,15 +734,15 @@ proc_byERastAvg = []
 
 if constRast:
     if byARast:
-        proc_byARastAvg = bioyield(reproj_constRast,reproj_byARast,fullRast_noConstr,fullGridSHP,gridRast)
+        [proc_byARast, proc_byARastAvg] = bioyield(reproj_constRast,reproj_byARast,fullRast_noConstr,fullGridSHP,gridRast)
     if byBRast:
-        proc_byBRastAvg = bioyield(reproj_constRast,reproj_byBRast,fullRast_noConstr,fullGridSHP,gridRast)
+        [proc_byBRast, proc_byBRastAvg] = bioyield(reproj_constRast,reproj_byBRast,fullRast_noConstr,fullGridSHP,gridRast)
     if byCRast:
-        proc_byCRastAvg = bioyield(reproj_constRast,reproj_byCRast,fullRast_noConstr,fullGridSHP,gridRast)
+        [proc_byCRast, proc_byCRastAvg] = bioyield(reproj_constRast,reproj_byCRast,fullRast_noConstr,fullGridSHP,gridRast)
     if byDRast:
-        proc_byDRastAvg = bioyield(reproj_constRast,reproj_byDRast,fullRast_noConstr,fullGridSHP,gridRast)
+        [proc_byDRast, proc_byDRastAvg] = bioyield(reproj_constRast,reproj_byDRast,fullRast_noConstr,fullGridSHP,gridRast)
     if byERast:
-        proc_byERastAvg = bioyield(reproj_constRast,reproj_byERast,fullRast_noConstr,fullGridSHP,gridRast)
+        [proc_byERast, proc_byERastAvg] = bioyield(reproj_constRast,reproj_byERast,fullRast_noConstr,fullGridSHP,gridRast)
 
 t_13 = time.time()
 t_1213 = t_13 - t_12
@@ -651,13 +752,96 @@ print "Time to do bioyield raster calculations: %.2f s" % t_1213
 # do this right for averages
 flagBYavg = writeBioyield(proc_byARastAvg, Bioyield_Product_A,proc_byBRastAvg, Bioyield_Product_B,proc_byCRastAvg, Bioyield_Product_C,proc_byDRastAvg, Bioyield_Product_D,proc_byERastAvg, Bioyield_Product_E,outBYcsv)
 
+# Everything down - only if there is lin estimates - what about these output otherwise?
+if (proc_byARast):
+    ALUm = [i[0] for i in proc_byARast]
+    AMUm = [i[2] for i in proc_byARast]
+    AHUm = [i[4] for i in proc_byARast]
+    ALUb = [i[1] for i in proc_byARast]
+    AMUb = [i[3] for i in proc_byARast]
+    AHUb = [i[5] for i in proc_byARast]
+else:
+    ALUm = []
+    AMUm = []
+    AHUm = []
+    ALUb = []
+    AMUb = []
+    AHUb = []
+if (proc_byBRast):
+    BLUm = [i[0] for i in proc_byBRast]
+    BMUm = [i[2] for i in proc_byBRast]
+    BHUm = [i[4] for i in proc_byBRast]
+    BLUb = [i[1] for i in proc_byBRast]
+    BMUb = [i[3] for i in proc_byBRast]
+    BHUb = [i[5] for i in proc_byBRast]
+else:
+    BLUm = []
+    BMUm = []
+    BHUm = []
+    BLUb = []
+    BMUb = []
+    BHUb = []
+if (proc_byCRast):
+    CLUm = [i[0] for i in proc_byCRast]
+    CMUm = [i[2] for i in proc_byCRast]
+    CHUm = [i[4] for i in proc_byCRast]
+    CLUb = [i[1] for i in proc_byCRast]
+    CMUb = [i[3] for i in proc_byCRast]
+    CHUb = [i[5] for i in proc_byCRast]
+else:
+    CLUm = []
+    CMUm = []
+    CHUm = []
+    CLUb = []
+    CMUb = []
+    CHUb = []
+if (proc_byDRast):
+    DLUm = [i[0] for i in proc_byDRast]
+    DMUm = [i[2] for i in proc_byDRast]
+    DHUm = [i[4] for i in proc_byDRast]
+    DLUb = [i[1] for i in proc_byDRast]
+    DMUb = [i[3] for i in proc_byDRast]
+    DHUb = [i[5] for i in proc_byDRast]
+else:
+    DLUm = []
+    DMUm = []
+    DHUm = []
+    DLUb = []
+    DMUb = []
+    DHUb = []
+if (proc_byERast):
+    ELUm = [i[0] for i in proc_byERast]
+    EMUm = [i[2] for i in proc_byERast]
+    EHUm = [i[4] for i in proc_byERast]
+    ELUb = [i[1] for i in proc_byERast]
+    EMUb = [i[3] for i in proc_byERast]
+    EHUb = [i[5] for i in proc_byERast]
+else:
+    ELUm = []
+    EMUm = []
+    EHUm = []
+    ELUb = []
+    EMUb = []
+    EHUb = []
+
+flagLUm = writeBioyield(ALUm, Bioyield_Product_A,BLUm, Bioyield_Product_B,CLUm, Bioyield_Product_C,DLUm, Bioyield_Product_D,ELUm, Bioyield_Product_E,outBYLUmcsv)
+flagMUm = writeBioyield(AMUm, Bioyield_Product_A,BMUm, Bioyield_Product_B,CMUm, Bioyield_Product_C,DMUm, Bioyield_Product_D,EMUm, Bioyield_Product_E,outBYMUmcsv)
+flagHUm = writeBioyield(AHUm, Bioyield_Product_A,BHUm, Bioyield_Product_B,CHUm, Bioyield_Product_C,DHUm,Bioyield_Product_D,EHUm, Bioyield_Product_E,outBYHUmcsv)
+flagLUb = writeBioyield(ALUb, Bioyield_Product_A,BLUb, Bioyield_Product_B,CLUb, Bioyield_Product_C,DLUb, Bioyield_Product_D,ELUb, Bioyield_Product_E,outBYLUbcsv)
+flagMUb = writeBioyield(AMUb, Bioyield_Product_A,BMUb, Bioyield_Product_B,CMUb, Bioyield_Product_C,DMUb, Bioyield_Product_D,EMUb, Bioyield_Product_E,outBYMUbcsv)
+flagHUb = writeBioyield(AHUb, Bioyield_Product_A,BHUb, Bioyield_Product_B,CHUb, Bioyield_Product_C,DHUb, Bioyield_Product_D,EHUb, Bioyield_Product_E,outBYHUbcsv)
+
 t_14 = time.time()
 t_1314 = t_14 - t_13
 print "Time to write bioyield results: %.2f s" % t_1314
 
 
 QgsMapLayerRegistry.instance().removeMapLayer(gridRast)
-QgsMapLayerRegistry.instance().removeMapLayer(fullRast)
+if not(countrySHP.crs().authid() == fullRast_noConstr.crs().authid()):
+    QgsMapLayerRegistry.instance().removeMapLayer(reprojSHP)
+QgsMapLayerRegistry.instance().removeMapLayer(fullGridSHP)
+if constRast:
+    QgsMapLayerRegistry.instance().removeMapLayer(fullRast)
 
 t_total = t_13 - t_0
 print "Total time:"
