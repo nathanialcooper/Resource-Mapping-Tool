@@ -13,8 +13,9 @@ This program creates a cellular grid for use in biomass supply chain optimisatio
 
 This script requires:
 
-(1) a raster map of land use for the region of interest (2) the no data value used in the land use map (3) the list of raster values corresponding to land uses of interest (4) a raster map of constraints on the land (5) up to 5 raster maps of biomass yield for the region of interest (6) the product name for each yield map (7) a shapfile that outlines the area of interest (8) the desired number of cellular elements in the grid (9) the minimum relative size of cells to be used in the final grid
+(1) a raster map of land use for the region of interest (2) the no data value used in the land use map (3) the list of raster values corresponding to land uses of interest (4) a raster map of constraints on the land (5) up to 5 raster maps of biomass yield for the region of interest (6) the product name for each yield map (7) a shapfile that outlines the area of interest (8) the desired number of cellular elements in the grid (9) the minimum relative size of cells to be used in the final grid (10 & 11) the x-value fraction at which the break points for the linear estimators occur
+
 
 This script outputs:
 
-(1) a matrix with cell ID numbers and the area of the cell (2) a matrix with the linear distance between all pairs of cells (3) a matrix with the cell ID and usable land area of the cell (4) a matrix containing the tortuosity between all cells (5) a matrix with the cell ID and and average bioyeld per cell (6) the shapefile of the cellular grid that was used to aggregate the data
+(1) a matrix with cell ID numbers and the area of the cell (2) a matrix with the linear distance between all pairs of cells (3) a matrix with the cell ID and usable land area of the cell (4) a matrix containing the tortuosity between all cells (5) a matrix with the cell ID and and average bioyeld per cell (6) the shapefile of the cellular grid that was used to aggregate the data (7-9) the slope of the biomass yield approximations (10-12) the intercept of the biomass yield approximations 
